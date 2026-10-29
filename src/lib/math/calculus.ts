@@ -1,7 +1,7 @@
 import { gcd, CalcError } from "./rational.ts";
 import type { Piece, Step } from "./solve";
 
-export type CalcOp = "diff" | "int";
+export type CalcOp = "diff" | "int" | "expand";
 
 export type CalculusSolution = {
   input: string;
@@ -1776,10 +1776,123 @@ export function splitCalcPrefix(input: string): { op: CalcOp | null; body: strin
   return { op, body: s };
 }
 
+function monomial(s: S): { deg: number; coeff: R } | null {
+  const { coeff, rest } = splitCoeff(s);
+  if (eq(rest, ONE)) return { deg: 0, coeff };
+  if (rest.t === "x") return { deg: 1, coeff };
+  if (rest.t === "pow" && rest.b.t === "x" && isIntQ(rest.e) && rest.e.n >= 0n) {
+    return { deg: Number(rest.e.n), coeff };
+  }
+  return null;
+}
+
+function asPoly(s: S): { deg: number; node: S; terms: S[] } | null {
+  const node = simp(s);
+  const terms = node.t === "add" ? node.a : [node];
+  let deg = 0;
+  for (const term of terms) {
+    const got = monomial(term);
+    if (!got) return null;
+    if (got.deg > deg) deg = got.deg;
+  }
+  return { deg, node, terms };
+}
+
+function shownTerm(term: S): Piece[] {
+  const body = pretty(term);
+  return splitCoeff(term).coeff.n < 0n ? [T("("), ...body, T(")")] : body;
+}
+
+function absTerm(term: S): S {
+  const { coeff, rest } = splitCoeff(term);
+  const mag = coeff.n < 0n ? { n: -coeff.n, d: coeff.d } : coeff;
+  return scale(mag, rest);
+}
+
+function signedSum(terms: S[]): Piece[] {
+  const out: Piece[] = [];
+  terms.forEach((term, index) => {
+    const neg = splitCoeff(term).coeff.n < 0n;
+    if (index === 0) {
+      out.push(...pretty(term));
+      return;
+    }
+    out.push(neg ? T(" − ") : T(" + "), ...pretty(neg ? absTerm(term) : term));
+  });
+  return out;
+}
+
+function explainExpand(ast: S): { value: S; steps: Step[]; headline: string } {
+  if (ast.t !== "mul" || ast.a.length < 2) {
+    throw new CalcError("請把兩個二次多項式相乘，例如 (x^2+2x+1)(x^2−3x+2)");
+  }
+  const polys = ast.a.map((factor) => {
+    const poly = asPoly(factor);
+    if (!poly) throw new CalcError("這不是 x 的多項式。例如 (x^2+2x+1)(x^2−3x+2)");
+    if (poly.deg > 2) throw new CalcError("目前只乘開二次以內的多項式");
+    return poly;
+  });
+  const steps: Step[] = [{ title: "原式", lines: [pretty(ast)] }];
+  const standard = polys.map((poly) => poly.node);
+  if (polys.some((poly, index) => sig(poly.node) !== sig(ast.a[index]!))) {
+    steps.push({ title: "先整理成降冪", lines: [pretty({ t: "mul", a: standard })] });
+  }
+  let acc = polys[0]!;
+  for (let i = 1; i < polys.length; i += 1) {
+    const right = polys[i]!;
+    const products: S[] = [];
+    const lines: Piece[][] = [];
+    for (const left of acc.terms) {
+      for (const term of right.terms) {
+        const prod = simpMul([left, term]);
+        products.push(prod);
+        lines.push([...shownTerm(left), T(" · "), ...shownTerm(term), T(" = "), ...pretty(prod)]);
+      }
+    }
+    steps.push({ title: "每一項乘每一項", lines });
+    const groups = new Map<number, S[]>();
+    for (const prod of products) {
+      const got = monomial(prod);
+      if (!got) throw new CalcError("乘開時出現不是多項式的項");
+      const list = groups.get(got.deg) ?? [];
+      list.push(prod);
+      groups.set(got.deg, list);
+    }
+    const combined = simpAdd(products);
+    const merged: Piece[][] = [];
+    for (const deg of [...groups.keys()].sort((a, b) => b - a)) {
+      const terms = groups.get(deg)!;
+      if (terms.length < 2) continue;
+      merged.push([...signedSum(terms), T(" = "), ...pretty(simpAdd(terms))]);
+    }
+    merged.push(pretty(combined));
+    steps.push({ title: "合併同類項", lines: merged });
+    const terms = combined.t === "add" ? combined.a : [combined];
+    let deg = 0;
+    for (const term of terms) deg = Math.max(deg, monomial(term)?.deg ?? 0);
+    acc = { deg, node: combined, terms };
+  }
+  const quadratic = polys.length === 2 && polys.every((poly) => poly.deg === 2);
+  return { value: acc.node, steps, headline: quadratic ? "二次相乘" : "多項式乘開" };
+}
+
 export function solveCalculus(input: string, requested: CalcOp): CalculusSolution {
   const { op: leading, body } = splitCalcPrefix(input);
-  const op = leading ?? requested;
+  const op = requested === "expand" ? "expand" : (leading ?? requested);
   const ast = parseExpr(body);
+  if (op === "expand") {
+    const explained = explainExpand(ast);
+    const answerPieces = pretty(explained.value);
+    return {
+      input: body,
+      op,
+      steps: explained.steps,
+      answer: answerPieces,
+      linear: flat(answerPieces),
+      headline: explained.headline,
+      inputPretty: pretty(ast),
+    };
+  }
   const explained = op === "diff" ? explainDiff(ast) : explainInt(ast);
   const answerPieces = op === "int" ? [...pretty(explained.value), T(" + C")] : pretty(explained.value);
   const steps: Step[] = [{ title: "原式", lines: [pretty(ast)] }, ...explained.steps];
@@ -1806,7 +1919,9 @@ export function tryPrettyCalc(input: string): Piece[] | null {
 
 export function calculusAnswer(input: string, op: CalcOp): S {
   const { body } = splitCalcPrefix(input);
-  const ast = simp(parseExpr(body));
+  const raw = parseExpr(body);
+  if (op === "expand") return explainExpand(raw).value;
+  const ast = simp(raw);
   return op === "diff" ? D(ast) : integrateNode(ast);
 }
 

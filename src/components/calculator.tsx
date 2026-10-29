@@ -6,10 +6,17 @@ import { CalcError, solve, tryPretty, type Solution } from "@/lib/math/solve";
 
 const STARTER = "1/2 + 1/3";
 const CALC_STARTER = "x^3 + 2x";
+const POLY_STARTER = "(x^2+2x+1)(x^2-3x+2)";
 const HISTORY_KEY = "xisuan.history.v2";
 
 const FRAC_EXAMPLES = ["1/2 + 1/3", "2/3÷4/5", "2/3/4/5", "2又1/3", "0.1 + 0.2", "(1/2)^3", "50% + 1/4", "√(9/4)"];
 const CALC_EXAMPLES = ["x^3 + 2x", "sin(2x)", "x sin x", "e^x", "ln x", "1/(1+x^2)", "(2x+1)^3"];
+const POLY_EXAMPLES = [
+  "(x^2+2x+1)(x^2-3x+2)",
+  "(x^2+1)(x^2-1)",
+  "(2x^2-x+3)(x^2+4x-2)",
+  "(x^2+5x+6)(x^2-x-2)",
+];
 
 const CALC_CHIPS: { label: string; insert: string }[] = [
   { label: "x", insert: "x" },
@@ -23,7 +30,7 @@ const CALC_CHIPS: { label: string; insert: string }[] = [
   { label: "arctan", insert: "arctan(" },
 ];
 
-type Mode = "frac" | "calc";
+type Mode = "frac" | "calc" | "poly";
 type HistItem = { expr: string; linear: string; at: number; mode?: Mode; op?: CalcOp };
 
 type Key =
@@ -130,15 +137,15 @@ function readHistory(): HistItem[] {
 
 export function Calculator() {
   const inputRef = useRef<HTMLInputElement>(null);
-  const [mode, setMode] = useState<Mode>("calc");
-  const [op, setOp] = useState<CalcOp>("diff");
-  const [value, setValue] = useState(CALC_STARTER);
-  const [caret, setCaret] = useState(CALC_STARTER.length);
-  const [selEnd, setSelEnd] = useState(CALC_STARTER.length);
+  const [mode, setMode] = useState<Mode>("poly");
+  const [op, setOp] = useState<CalcOp>("expand");
+  const [value, setValue] = useState(POLY_STARTER);
+  const [caret, setCaret] = useState(POLY_STARTER.length);
+  const [selEnd, setSelEnd] = useState(POLY_STARTER.length);
   const [solved, setSolved] = useState<Solution | null>(null);
   const [calcSolved, setCalcSolved] = useState<CalculusSolution | null>(() => {
     try {
-      return solveCalculus(CALC_STARTER, "diff");
+      return solveCalculus(POLY_STARTER, "expand");
     } catch {
       return null;
     }
@@ -149,12 +156,16 @@ export function Calculator() {
   const [copied, setCopied] = useState(false);
   const [hydrated, setHydrated] = useState(false);
 
-  const preview = useMemo(() => (mode === "calc" ? tryPrettyCalc(value) : tryPretty(value)), [mode, value]);
+  const preview = useMemo(
+    () => (mode === "frac" ? tryPretty(value) : tryPrettyCalc(value)),
+    [mode, value],
+  );
   const showing = mode === "frac" && solved && solved.input === value ? solved : null;
-  const showingCalc = mode === "calc" && calcSolved && calcSolved.input === value && calcSolved.op === op ? calcSolved : null;
+  const showingCalc =
+    mode !== "frac" && calcSolved && calcSolved.input === value && calcSolved.op === op ? calcSolved : null;
   const steps = showingCalc?.steps ?? showing?.steps ?? null;
-  const examples = mode === "calc" ? CALC_EXAMPLES : FRAC_EXAMPLES;
-  const keys = mode === "calc" ? CALC_KEYS : KEYS;
+  const examples = mode === "poly" ? POLY_EXAMPLES : mode === "calc" ? CALC_EXAMPLES : FRAC_EXAMPLES;
+  const keys = mode === "frac" ? KEYS : CALC_KEYS;
 
   useEffect(() => {
     setHistory(readHistory());
@@ -248,20 +259,22 @@ export function Calculator() {
   }
 
   function calculate(expr = value) {
-    if (mode === "calc") calculateCalc(expr, op);
+    if (mode === "poly") calculateCalc(expr, "expand");
+    else if (mode === "calc") calculateCalc(expr, op);
     else calculateFrac(expr);
   }
 
   function loadExpr(expr: string, itemMode: Mode = mode, itemOp: CalcOp = op) {
+    const nextOp = itemMode === "poly" ? "expand" : itemMode === "frac" ? op : itemOp;
     setMode(itemMode);
-    setOp(itemOp);
+    setOp(itemMode === "poly" ? "expand" : nextOp);
     setValue(expr);
     setCaret(expr.length);
     setSelEnd(expr.length);
     setHistOpen(false);
     setError(null);
-    if (itemMode === "calc") calculateCalc(expr, itemOp);
-    else calculateFrac(expr);
+    if (itemMode === "frac") calculateFrac(expr);
+    else calculateCalc(expr, itemMode === "poly" ? "expand" : itemOp);
   }
 
   function switchMode(next: Mode) {
@@ -269,12 +282,17 @@ export function Calculator() {
     setMode(next);
     setError(null);
     setCopied(false);
-    if (next === "calc" && (value === STARTER || value.trim() === "")) {
+    const blank = value.trim() === "";
+    if (next === "calc" && (blank || value === STARTER || value === POLY_STARTER)) {
       loadExpr(CALC_STARTER, "calc", "diff");
       return;
     }
-    if (next === "frac" && (value === CALC_STARTER || value.trim() === "")) {
+    if (next === "frac" && (blank || value === CALC_STARTER || value === POLY_STARTER)) {
       loadExpr(STARTER, "frac");
+      return;
+    }
+    if (next === "poly" && (blank || value === STARTER || value === CALC_STARTER)) {
+      loadExpr(POLY_STARTER, "poly", "expand");
     }
   }
 
@@ -297,7 +315,8 @@ export function Calculator() {
           className="contents lg:flex lg:h-dvh lg:w-96 lg:shrink-0 lg:flex-col lg:border-r lg:border-line"
           onSubmit={(event) => {
             event.preventDefault();
-            if (mode === "calc") calculateCalc(value, "diff");
+            if (mode === "poly") calculateCalc(value, "expand");
+            else if (mode === "calc") calculateCalc(value, "diff");
             else calculate();
           }}
         >
@@ -306,7 +325,11 @@ export function Calculator() {
               <div>
                 <h1 className="font-serif text-3xl leading-none">析算</h1>
                 <p className="mt-1 text-sm text-muted">
-                  {mode === "calc" ? "對 x 微分或積分，按下去看過程" : "分數計算機，按等於看過程"}
+                  {mode === "poly"
+                    ? "兩個二次多項式相乘，按下去看展開"
+                    : mode === "calc"
+                      ? "對 x 微分或積分，按下去看過程"
+                      : "分數計算機，按等於看過程"}
                 </p>
               </div>
               <button
@@ -319,7 +342,7 @@ export function Calculator() {
                 <History className="size-5" aria-hidden />
               </button>
             </div>
-            <div className="mt-3 grid grid-cols-2 rounded-full border border-line bg-key p-1">
+            <div className="mt-3 grid grid-cols-3 rounded-full border border-line bg-key p-1 text-sm">
               <button
                 type="button"
                 aria-pressed={mode === "frac"}
@@ -336,6 +359,14 @@ export function Calculator() {
               >
                 微積分
               </button>
+              <button
+                type="button"
+                aria-pressed={mode === "poly"}
+                onClick={() => switchMode("poly")}
+                className={`h-11 rounded-full ${mode === "poly" ? "bg-fg text-surface" : "text-muted"}`}
+              >
+                多項式
+              </button>
             </div>
           </header>
 
@@ -348,7 +379,9 @@ export function Calculator() {
                 id="expr"
                 ref={inputRef}
                 value={value}
-                placeholder={mode === "calc" ? "例如 x^3 + 2x" : "例如 1/2 + 1/3"}
+                placeholder={
+                  mode === "poly" ? "例如 (x^2+2x+1)(x^2-3x+2)" : mode === "calc" ? "例如 x^3 + 2x" : "例如 1/2 + 1/3"
+                }
                 autoCapitalize="off"
                 autoCorrect="off"
                 spellCheck={false}
@@ -366,7 +399,7 @@ export function Calculator() {
                 type="submit"
                 className="h-12 shrink-0 rounded-xl bg-accent px-4 font-medium text-accent-fg"
               >
-                {mode === "calc" ? "微分" : "計算"}
+                {mode === "poly" ? "乘開" : mode === "calc" ? "微分" : "計算"}
               </button>
             </div>
             <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
@@ -446,14 +479,18 @@ export function Calculator() {
               </div>
             ) : preview ? (
               <div>
-                <p className="text-sm text-muted">{mode === "calc" ? "式子" : "分數寫法"}</p>
+                <p className="text-sm text-muted">{mode === "frac" ? "分數寫法" : "式子"}</p>
                 <div className="mt-1 overflow-x-auto">
                   <MathLine pieces={preview} size="lg" />
                 </div>
               </div>
             ) : (
               <p className="text-sm text-muted">
-                {mode === "calc" ? "輸入含 x 的式子，按微分或積分。" : "輸入算式後，按等於或計算，過程會寫在下面。"}
+                {mode === "poly"
+                  ? "輸入兩個二次多項式相乘，按乘開。"
+                  : mode === "calc"
+                    ? "輸入含 x 的式子，按微分或積分。"
+                    : "輸入算式後，按等於或計算，過程會寫在下面。"}
               </p>
             )}
           </div>
@@ -508,6 +545,10 @@ export function Calculator() {
                     積分
                   </button>
                 </>
+              ) : mode === "poly" ? (
+                <button type="submit" className={`col-span-4 h-12 rounded-xl border font-serif text-lg ${toneClass.eq}`}>
+                  乘開
+                </button>
               ) : null}
             </div>
           </div>
@@ -563,6 +604,13 @@ export function Calculator() {
                   </li>
                 ))}
               </ol>
+            ) : mode === "poly" ? (
+              <p className="mt-3 max-w-md text-pretty text-base leading-relaxed">
+                按「乘開」，左邊每一項會乘到右邊，再合併同類項。
+                <span className="mt-2 block text-sm text-muted">
+                  括號靠在一起就是相乘，例如 (x^2+2x+1)(x^2−3x+2)。
+                </span>
+              </p>
             ) : mode === "calc" ? (
               <p className="mt-3 max-w-md text-pretty text-base leading-relaxed">
                 按「微分」或「積分」，這裡會寫出冪次、乘積、連鎖，或湊微分。
